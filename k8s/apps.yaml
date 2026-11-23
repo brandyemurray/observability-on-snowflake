@@ -1,0 +1,152 @@
+# Summit Peak Resort: four services and a load generator, all from one image.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: summit-peak
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-env
+  namespace: summit-peak
+data:
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability:4318
+  DEPLOY_ENV: lab
+  PAYMENTS_URL: http://payments:8000
+  NOTIFICATIONS_URL: http://notifications:8000
+  LIFT_TICKETS_URL: http://lift-tickets:8000
+  RENTALS_URL: http://rentals:8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lift-tickets
+  namespace: summit-peak
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: lift-tickets}}
+  template:
+    metadata:
+      labels: {app: lift-tickets, tier: guest-facing}
+    spec:
+      containers:
+        - name: app
+          image: summit-peak/app:lab
+          imagePullPolicy: Never
+          env: [{name: APP_MODULE, value: "skiapp.lift_tickets:app"}]
+          envFrom: [{configMapRef: {name: otel-env}}]
+          ports: [{containerPort: 8000}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8000}, periodSeconds: 5}
+          resources: {requests: {cpu: 50m, memory: 96Mi}, limits: {memory: 256Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rentals
+  namespace: summit-peak
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: rentals}}
+  template:
+    metadata:
+      labels: {app: rentals, tier: guest-facing}
+    spec:
+      containers:
+        - name: app
+          image: summit-peak/app:lab
+          imagePullPolicy: Never
+          env: [{name: APP_MODULE, value: "skiapp.rentals:app"}]
+          envFrom: [{configMapRef: {name: otel-env}}]
+          ports: [{containerPort: 8000}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8000}, periodSeconds: 5}
+          resources: {requests: {cpu: 50m, memory: 96Mi}, limits: {memory: 256Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+  namespace: summit-peak
+spec:
+  # One replica on purpose: its provider connection pool is the bottleneck
+  # this lab is designed to expose.
+  replicas: 1
+  selector: {matchLabels: {app: payments}}
+  template:
+    metadata:
+      labels: {app: payments, tier: backend}
+    spec:
+      containers:
+        - name: app
+          image: summit-peak/app:lab
+          imagePullPolicy: Never
+          env:
+            - {name: APP_MODULE, value: "skiapp.payments:app"}
+            - {name: PROVIDER_POOL_SIZE, value: "8"}
+          envFrom: [{configMapRef: {name: otel-env}}]
+          ports: [{containerPort: 8000}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8000}, periodSeconds: 5}
+          resources: {requests: {cpu: 50m, memory: 96Mi}, limits: {memory: 256Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications
+  namespace: summit-peak
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: notifications}}
+  template:
+    metadata:
+      labels: {app: notifications, tier: backend}
+    spec:
+      containers:
+        - name: app
+          image: summit-peak/app:lab
+          imagePullPolicy: Never
+          env: [{name: APP_MODULE, value: "skiapp.notifications:app"}]
+          envFrom: [{configMapRef: {name: otel-env}}]
+          ports: [{containerPort: 8000}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8000}, periodSeconds: 5}
+          resources: {requests: {cpu: 50m, memory: 96Mi}, limits: {memory: 256Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: summit-peak
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: loadgen}}
+  template:
+    metadata:
+      labels: {app: loadgen, tier: traffic}
+    spec:
+      containers:
+        - name: app
+          image: summit-peak/app:lab
+          imagePullPolicy: Never
+          env:
+            - {name: APP_MODULE, value: "skiapp.loadgen:app"}
+            - {name: RPS, value: "4"}
+          envFrom: [{configMapRef: {name: otel-env}}]
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 192Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lift-tickets, namespace: summit-peak}
+spec: {selector: {app: lift-tickets}, ports: [{port: 8000, targetPort: 8000}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: rentals, namespace: summit-peak}
+spec: {selector: {app: rentals}, ports: [{port: 8000, targetPort: 8000}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: payments, namespace: summit-peak}
+spec: {selector: {app: payments}, ports: [{port: 8000, targetPort: 8000}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: notifications, namespace: summit-peak}
+spec: {selector: {app: notifications}, ports: [{port: 8000, targetPort: 8000}]}

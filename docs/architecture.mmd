@@ -1,0 +1,65 @@
+flowchart LR
+  subgraph cluster["Kubernetes cluster (kind, in GitHub Codespaces)"]
+    direction LR
+    subgraph app["Summit Peak Resort app"]
+      direction TB
+      guests["Load generator<br/><i>simulated guests</i>"]
+      lift["lift-tickets"]
+      rent["rentals"]
+      pay["payments"]
+      note["notifications"]
+      prov[("Payment provider<br/><i>pool of 8 connections</i>")]
+      guests --> lift & rent
+      lift --> pay
+      rent --> pay
+      lift -.-> note
+      rent -.-> note
+      pay --> prov
+    end
+    subgraph obs["OpenTelemetry Collector"]
+      direction TB
+      c1["1 · Memory limit"]
+      c2["2 · Kubernetes context<br/><i>pod, deployment, node</i>"]
+      c3["3 · PII redaction<br/><i>hash emails, mask cards</i>"]
+      c4["4 · Span metrics<br/><i>from 100% of requests</i>"]
+      c5["5 · Tail sampling<br/><i>all errors, all slow, 10% of the rest</i>"]
+      c1 --> c2 --> c3 --> c4 --> c5
+    end
+    loader["Snowflake loader<br/><i>micro-batch every 30s</i>"]
+    jaeger["Jaeger<br/><i>stands in for the incumbent vendor</i>"]
+  end
+
+  subgraph sf["Snowflake · SKI_OBS"]
+    direction TB
+    raw["RAW<br/><i>OTLP payloads as VARIANT</i>"]
+    otel["OTEL<br/><i>spans, logs, metric points</i>"]
+    ops["OPS<br/><i>golden signals, SLOs</i>"]
+    alert{{"Alert<br/><i>every minute</i>"}}
+    inc["Incidents"]
+    ai["Cortex AI SRE summary<br/><i>coming next</i>"]
+    st["Streamlit ops app<br/><i>coming next</i>"]
+    raw --> otel --> ops --> alert --> inc --> ai
+    ops --> st
+    inc --> st
+  end
+
+  app == "OTLP: traces, metrics, logs" ==> obs
+  obs == "OTLP/JSON" ==> loader
+  obs -. "dual-ship traces" .-> jaeger
+  loader == "PUT + COPY<br/>key-pair service user" ==> raw
+
+  classDef appNode fill:#FFFFFF,stroke:#173F49,stroke-width:1.5px,color:#173F49
+  classDef colNode fill:#E6F0F1,stroke:#173F49,stroke-width:1.5px,color:#173F49
+  classDef sfNode fill:#173F49,stroke:#173F49,color:#FFFFFF
+  classDef hot fill:#DE5C63,stroke:#B8434A,color:#FFFFFF
+  classDef muted fill:#F4F6F7,stroke:#8FA3A8,color:#4A5B60,stroke-dasharray:4 3
+  class guests,lift,rent,pay,note appNode
+  class prov hot
+  class c1,c2,c3,c4,c5,loader colNode
+  class raw,otel,ops,inc sfNode
+  class alert hot
+  class ai,st,jaeger muted
+  style cluster fill:#FAFBFB,stroke:#8FA3A8,color:#173F49
+  style app fill:#FFFFFF,stroke:#C9D4D6,color:#173F49
+  style obs fill:#FFFFFF,stroke:#C9D4D6,color:#173F49
+  style sf fill:#EEF4F5,stroke:#173F49,color:#173F49

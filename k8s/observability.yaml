@@ -1,0 +1,138 @@
+# Telemetry pipeline: OpenTelemetry Collector, Snowflake loader and Jaeger.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+---
+# The Collector reads pod metadata from the Kubernetes API (k8sattributes).
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: otel-collector, namespace: observability}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: otel-collector}
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes]
+    verbs: [get, watch, list]
+  - apiGroups: [apps]
+    resources: [replicasets, deployments]
+    verbs: [get, watch, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: otel-collector}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: otel-collector}
+subjects: [{kind: ServiceAccount, name: otel-collector, namespace: observability}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: otel-collector, namespace: observability}
+spec:
+  # A single replica keeps every span of a trace on one Collector, which tail
+  # sampling needs. At scale: a load-balancing tier routes by trace ID (ADR 0004).
+  replicas: 1
+  selector: {matchLabels: {app: otel-collector}}
+  template:
+    metadata:
+      labels: {app: otel-collector}
+      annotations:
+        # Changes when the config changes, so `make deploy` restarts the Collector.
+        config-hash: "CONFIG_HASH"
+    spec:
+      serviceAccountName: otel-collector
+      containers:
+        - name: otelcol
+          image: otel/opentelemetry-collector-contrib:0.135.0
+          args: ["--config=/conf/collector.yaml"]
+          env:
+            - {name: SNOWFLAKE_LOADER_ENDPOINT, value: "http://snowflake-loader:4318"}
+            - {name: JAEGER_ENDPOINT, value: "jaeger:4317"}
+            - name: GOMEMLIMIT
+              value: "400MiB"
+          ports:
+            - {containerPort: 4317, name: otlp-grpc}
+            - {containerPort: 4318, name: otlp-http}
+            - {containerPort: 13133, name: health}
+          readinessProbe: {httpGet: {path: /, port: 13133}, periodSeconds: 5}
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
+          volumeMounts: [{name: config, mountPath: /conf}]
+      volumes:
+        - name: config
+          configMap: {name: otel-collector-config}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: otel-collector, namespace: observability}
+spec:
+  selector: {app: otel-collector}
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: 4317}
+    - {name: otlp-http, port: 4318, targetPort: 4318}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: snowflake-loader, namespace: observability}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: snowflake-loader}}
+  template:
+    metadata:
+      labels: {app: snowflake-loader}
+    spec:
+      containers:
+        - name: loader
+          image: summit-peak/loader:lab
+          imagePullPolicy: Never
+          env:
+            - {name: FLUSH_SECONDS, value: "30"}
+            - name: SNOWFLAKE_ACCOUNT
+              valueFrom:
+                secretKeyRef: {name: snowflake-loader, key: SNOWFLAKE_ACCOUNT, optional: true}
+          ports: [{containerPort: 4318}]
+          readinessProbe: {httpGet: {path: /healthz, port: 4318}, periodSeconds: 5}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 384Mi}}
+          volumeMounts:
+            - {name: spool, mountPath: /data/spool}
+            - {name: key, mountPath: /secrets, readOnly: true}
+      volumes:
+        # Lab only. In production the spool belongs on a persistent volume.
+        - name: spool
+          emptyDir: {}
+        - name: key
+          secret: {secretName: snowflake-loader, optional: true, items: [{key: loader_key.p8, path: loader_key.p8}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: snowflake-loader, namespace: observability}
+spec: {selector: {app: snowflake-loader}, ports: [{port: 4318, targetPort: 4318}]}
+---
+# Jaeger stands in for the incumbent tracing vendor during the migration.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: jaeger, namespace: observability}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: jaeger}}
+  template:
+    metadata:
+      labels: {app: jaeger}
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.62.0
+          env: [{name: COLLECTOR_OTLP_ENABLED, value: "true"}]
+          ports:
+            - {containerPort: 16686, name: ui}
+            - {containerPort: 4317, name: otlp-grpc}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: jaeger, namespace: observability}
+spec:
+  selector: {app: jaeger}
+  ports:
+    - {name: ui, port: 16686, targetPort: 16686}
+    - {name: otlp-grpc, port: 4317, targetPort: 4317}

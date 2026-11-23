@@ -1,0 +1,145 @@
+# OpenTelemetry Collector for the Summit Peak lab.
+#
+# Path of every signal:
+#
+#   apps --OTLP--> receive --> protect memory --> add Kubernetes context --> redact PII
+#        traces:  --> RED metrics (before sampling) --> tail sampling --> Snowflake + Jaeger
+#        metrics: --> Snowflake
+#        logs:    --> Snowflake
+#
+# Design choices are explained in docs/adr/. The short version:
+# - PII is removed here, at the edge, so it never reaches any backend (ADR 0002).
+# - Request, error and duration metrics are computed from 100% of spans, before
+#   sampling, so error rates stay accurate while trace storage stays small (ADR 0004).
+# - Traces are dual-shipped to Snowflake and to Jaeger, which stands in for the
+#   incumbent vendor during a migration (ADR 0005).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Refuse data before running out of memory, instead of crashing.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+  # Attach the pod, deployment, namespace and node to every span, metric and log.
+  k8sattributes:
+    auth_type: serviceAccount
+    passthrough: false
+    pod_association:
+      - sources:
+          - from: connection
+    extract:
+      metadata:
+        - k8s.namespace.name
+        - k8s.deployment.name
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.node.name
+      labels:
+        - tag_name: app.tier
+          key: tier
+          from: pod
+
+  # Remove guest PII before it leaves the cluster.
+  # - guest.email is hashed, so analysts can still count unique guests.
+  # - card numbers keep only the last four digits.
+  # - emails and card numbers inside log text are masked.
+  transform/redact:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["guest.email"], SHA256(attributes["guest.email"])) where attributes["guest.email"] != nil
+          - replace_pattern(attributes["payment.card_number"], "^.*(\\d{4})$", "****$$1") where attributes["payment.card_number"] != nil
+    log_statements:
+      - context: log
+        statements:
+          - replace_pattern(body, "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "<email redacted>")
+          - replace_pattern(body, "(?:\\d[ -]?){8,15}(\\d{4})", "<card ****$$1>")
+
+  # Keep every failed or slow trace, and 10% of the healthy ones.
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 50000
+    policies:
+      - name: keep-errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: keep-slow
+        type: latency
+        latency:
+          threshold_ms: 1000
+      - name: sample-healthy
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+  batch:
+    send_batch_size: 2048
+    timeout: 5s
+
+connectors:
+  # Request count and duration per service, endpoint and status, from every span.
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 3s, 5s]
+    aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
+    metrics_flush_interval: 15s
+
+  # Hands traces from the "all spans" pipeline to the sampled pipeline.
+  forward/sampling:
+
+exporters:
+  # Snowflake, through the loader service (see loader/loader.py).
+  otlphttp/snowflake:
+    endpoint: ${env:SNOWFLAKE_LOADER_ENDPOINT:-http://snowflake-loader:4318}
+    encoding: json
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 10m
+
+  # Jaeger stands in for the incumbent observability vendor during migration.
+  otlp/jaeger:
+    endpoint: ${env:JAEGER_ENDPOINT:-jaeger:4317}
+    tls:
+      insecure: true
+
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces/in:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, transform/redact]
+      exporters: [spanmetrics, forward/sampling]
+    traces/out:
+      receivers: [forward/sampling]
+      processors: [tail_sampling, batch]
+      exporters: [otlphttp/snowflake, otlp/jaeger]
+    metrics:
+      receivers: [otlp, spanmetrics]
+      processors: [memory_limiter, k8sattributes, batch]
+      exporters: [otlphttp/snowflake]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, transform/redact, batch]
+      exporters: [otlphttp/snowflake]

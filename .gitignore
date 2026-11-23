@@ -1,0 +1,16 @@
+# Secrets: never commit these
+.env
+.secrets/
+*.p8
+*.pem
+*.pub
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local runs
+spool/
+*.log
+.DS_Store

@@ -1,0 +1,60 @@
+-- =============================================================================
+-- 01_raw.sql: landing stage and RAW tables
+-- Each row is one OTLP export request from the Collector, kept as VARIANT.
+-- Keeping the raw payload means new attributes never need a schema change,
+-- and every model downstream can be rebuilt from it.
+-- =============================================================================
+USE ROLE OBS_ADMIN;
+USE WAREHOUSE OBS_QUERY_WH;
+USE SCHEMA SKI_OBS.RAW;
+
+CREATE STAGE IF NOT EXISTS OTLP_LANDING
+  FILE_FORMAT = (TYPE = JSON)
+  COMMENT = 'Loader PUTs newline-delimited OTLP/JSON here; COPY purges after loading';
+
+CREATE TABLE IF NOT EXISTS OTLP_TRACES (
+  PAYLOAD   VARIANT       COMMENT 'One OTLP ExportTraceServiceRequest',
+  FILE_NAME STRING        COMMENT 'Staged file the row came from',
+  LOADED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+);
+CREATE TABLE IF NOT EXISTS OTLP_METRICS (
+  PAYLOAD   VARIANT       COMMENT 'One OTLP ExportMetricsServiceRequest',
+  FILE_NAME STRING,
+  LOADED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+);
+CREATE TABLE IF NOT EXISTS OTLP_LOGS (
+  PAYLOAD   VARIANT       COMMENT 'One OTLP ExportLogsServiceRequest',
+  FILE_NAME STRING,
+  LOADED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Least privilege for the loader: stage files, insert rows, nothing else.
+GRANT USAGE ON DATABASE SKI_OBS TO ROLE OBS_INGEST;
+GRANT USAGE ON SCHEMA SKI_OBS.RAW TO ROLE OBS_INGEST;
+GRANT READ, WRITE ON STAGE OTLP_LANDING TO ROLE OBS_INGEST;
+GRANT INSERT, SELECT ON TABLE OTLP_TRACES  TO ROLE OBS_INGEST;
+GRANT INSERT, SELECT ON TABLE OTLP_METRICS TO ROLE OBS_INGEST;
+GRANT INSERT, SELECT ON TABLE OTLP_LOGS    TO ROLE OBS_INGEST;
+
+-- Retention: raw telemetry older than 14 days is deleted every night.
+CREATE OR REPLACE PROCEDURE PURGE_OLD_TELEMETRY(DAYS_TO_KEEP INT)
+  RETURNS STRING
+  LANGUAGE SQL
+AS
+$$
+BEGIN
+  DELETE FROM SKI_OBS.RAW.OTLP_TRACES  WHERE LOADED_AT < DATEADD(day, -:DAYS_TO_KEEP, CURRENT_TIMESTAMP());
+  DELETE FROM SKI_OBS.RAW.OTLP_METRICS WHERE LOADED_AT < DATEADD(day, -:DAYS_TO_KEEP, CURRENT_TIMESTAMP());
+  DELETE FROM SKI_OBS.RAW.OTLP_LOGS    WHERE LOADED_AT < DATEADD(day, -:DAYS_TO_KEEP, CURRENT_TIMESTAMP());
+  RETURN 'purged telemetry older than ' || DAYS_TO_KEEP || ' days';
+END;
+$$;
+
+CREATE OR REPLACE TASK PURGE_OLD_TELEMETRY_NIGHTLY
+  WAREHOUSE = OBS_INGEST_WH
+  SCHEDULE = 'USING CRON 15 3 * * * America/Denver'
+  COMMENT = 'Keep 14 days of raw telemetry'
+AS
+  CALL SKI_OBS.RAW.PURGE_OLD_TELEMETRY(14);
+
+ALTER TASK PURGE_OLD_TELEMETRY_NIGHTLY RESUME;
