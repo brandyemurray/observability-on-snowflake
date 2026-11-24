@@ -134,12 +134,12 @@ BEGIN
     || '\nEvidence:\n' || evidence;
 
   BEGIN
-    answer := SNOWFLAKE.CORTEX.COMPLETE(P_MODEL, prompt);
+    answer := AI_COMPLETE(P_MODEL, prompt);
     used_model := P_MODEL;
   EXCEPTION
     WHEN OTHER THEN
       -- The preferred model isn't available in every region; fall back to one that is.
-      answer := SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b', prompt);
+      answer := AI_COMPLETE('llama3.1-70b', prompt);
       used_model := 'llama3.1-70b';
   END;
 
