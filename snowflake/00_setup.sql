@@ -58,7 +58,7 @@ GRANT ROLE OBS_INGEST TO USER OBS_LOADER_SVC;
 -- ALTER USER OBS_LOADER_SVC SET RSA_PUBLIC_KEY = 'MIIBIjANBgkq...';
 
 -- Let you (the human) use every role while you build and test.
-SET me = CURRENT_USER();
+SET me = '"' || CURRENT_USER() || '"';   -- quoted, so mixed-case user names work too
 GRANT ROLE OBS_ADMIN TO USER IDENTIFIER($me);
 
 USE ROLE OBS_ADMIN;
