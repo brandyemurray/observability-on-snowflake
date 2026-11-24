@@ -38,7 +38,10 @@ def _value(v):
     return None
 
 def to_object(attribute_list):
-    return {a["key"]: _value(a.get("value")) for a in (attribute_list or []) if "key" in a}
+    # A missing list arrives as SQL NULL or JSON null (sqlNullWrapper): treat both as empty.
+    if not isinstance(attribute_list, list):
+        return {}
+    return {a["key"]: _value(a.get("value")) for a in attribute_list if isinstance(a, dict) and "key" in a}
 $$;
 
 -- -----------------------------------------------------------------------------
