@@ -55,6 +55,16 @@ make calm       # back to a quiet day
 
 Within a few minutes of `make incident`, `SKI_OBS.OPS.INCIDENTS` gets a new row for the services breaching their error-rate objective. It resolves itself after the services have been healthy for a full SLO window.
 
+### 4. The ops app and the AI SRE summary
+
+1. Run [`07_ai_sre.sql`](snowflake/07_ai_sre.sql). It adds a service catalog, the `SUMMARIZE_INCIDENT` procedure, and a role for the app.
+2. In Snowsight, switch to the role **OBS_APP_OWNER**, then go to **Projects → Streamlit → + Streamlit App**. Choose location `SKI_OBS.APP` and warehouse `OBS_QUERY_WH`.
+3. Replace the starter code with [`streamlit/ops_app.py`](streamlit/ops_app.py) and click **Run**.
+
+The app has five tabs: **Service health** (golden signals and SLO state), **Incidents** (with a button that writes an AI summary from the incident's evidence), **Traces** (a waterfall for any failed or slow request), **Logs** (search, masked by role) and **Pipeline** (freshness, and sampling compared with true counts).
+
+The AI summary runs with the caller's rights. In the app that's an analyst-level role, so the model only ever sees masked log text. It is told to use only the evidence it's given and to say what the data can't tell it.
+
 When you're done: `make down` deletes the cluster, and `ALTER ALERT SKI_OBS.OPS.SLO_WATCH SUSPEND;` stops the alert from waking a warehouse. [`99_teardown.sql`](snowflake/99_teardown.sql) removes everything from Snowflake.
 
 ## Repository layout
@@ -64,7 +74,8 @@ services/        The resort app: four FastAPI services and a load generator (one
 collector/       OpenTelemetry Collector configuration
 loader/          Receives OTLP/JSON from the Collector and micro-batches it into Snowflake
 k8s/             Kubernetes manifests (kind cluster, app, Collector, loader, Jaeger)
-snowflake/       Setup, models, golden signals, governance, alerts, checks, teardown
+snowflake/       Setup, models, golden signals, governance, alerts, AI SRE summary, checks, teardown
+streamlit/       Summit Peak operations app (Streamlit in Snowflake)
 docs/            Architecture diagram and study notes
 ```
 
