@@ -1,22 +1,12 @@
 {
   "name": "Summit Peak observability lab",
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
   "hostRequirements": {
     "cpus": 4
   },
-  "features": {
-    "ghcr.io/devcontainers/features/docker-in-docker:2": {
-      "moby": false
-    }
-  },
   "postCreateCommand": "bash .devcontainer/post-create.sh",
-  "forwardPorts": [
-    16686
-  ],
+  "forwardPorts": [16686],
   "portsAttributes": {
-    "16686": {
-      "label": "Jaeger UI",
-      "onAutoForward": "notify"
-    }
+    "16686": { "label": "Jaeger UI", "onAutoForward": "notify" }
   }
 }
