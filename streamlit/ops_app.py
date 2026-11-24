@@ -14,12 +14,18 @@ import streamlit as st
 st.set_page_config(page_title="Summit Peak operations", layout="wide")
 
 # ----------------------------------------------------------------------------- data access
-try:
-    from snowflake.snowpark.context import get_active_session
+def _session():
+    """Works in every Streamlit in Snowflake runtime: the classic warehouse
+    runtime (active session) and the newer container runtime (st.connection)."""
+    try:
+        from snowflake.snowpark.context import get_active_session
 
-    SESSION = get_active_session()
-except Exception:  # local preview: tests patch run()
-    SESSION = None
+        return get_active_session()
+    except Exception:
+        return st.connection("snowflake").session()
+
+
+SESSION = _session()
 
 TZ = "America/Denver"
 SERVICES = ["lift-tickets", "rentals", "payments", "notifications"]
