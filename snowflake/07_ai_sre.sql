@@ -68,11 +68,10 @@ DECLARE
   used_model STRING;
 BEGIN
   -- The window: 15 minutes before the incident opened, to when it resolved (or now).
-  SELECT DATEADD(minute, -15, OPENED_AT), COALESCE(RESOLVED_AT, SYSDATE())
-    INTO :w_start, :w_end
-    FROM SKI_OBS.OPS.INCIDENTS WHERE INCIDENT_ID = :P_INCIDENT_ID;
+  w_start := (SELECT DATEADD(minute, -15, OPENED_AT) FROM SKI_OBS.OPS.INCIDENTS WHERE INCIDENT_ID = :P_INCIDENT_ID);
+  w_end   := (SELECT COALESCE(RESOLVED_AT, SYSDATE()) FROM SKI_OBS.OPS.INCIDENTS WHERE INCIDENT_ID = :P_INCIDENT_ID);
 
-  SELECT TO_JSON(OBJECT_CONSTRUCT(
+  evidence := (SELECT TO_JSON(OBJECT_CONSTRUCT(
     'incident',
       (SELECT OBJECT_DELETE(OBJECT_CONSTRUCT(*), 'AI_SUMMARY', 'AI_SUMMARY_MODEL', 'AI_SUMMARY_AT')
          FROM SKI_OBS.OPS.INCIDENTS WHERE INCIDENT_ID = :P_INCIDENT_ID),
@@ -116,7 +115,7 @@ BEGIN
                 LIMIT 12)),
     'slos', (SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*)) FROM SKI_OBS.OPS.SLOS),
     'service_catalog', (SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*)) FROM SKI_OBS.OPS.SERVICE_CATALOG)
-  )) INTO :evidence;
+  )));
 
   prompt := 'You are a senior site reliability engineer writing the first summary of a production incident '
     || 'for the on-call team and their manager. Use ONLY the evidence in the JSON below. '
@@ -135,12 +134,12 @@ BEGIN
     || '\nEvidence:\n' || evidence;
 
   BEGIN
-    SELECT SNOWFLAKE.CORTEX.COMPLETE(:P_MODEL, :prompt) INTO :answer;
+    answer := SNOWFLAKE.CORTEX.COMPLETE(P_MODEL, prompt);
     used_model := P_MODEL;
   EXCEPTION
     WHEN OTHER THEN
       -- The preferred model isn't available in every region; fall back to one that is.
-      SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b', :prompt) INTO :answer;
+      answer := SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b', prompt);
       used_model := 'llama3.1-70b';
   END;
 
