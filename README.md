@@ -81,7 +81,7 @@ docs/            Architecture diagram and study notes
 
 ## Design notes
 
-A few choices worth calling out. Full decision records are in progress in `docs/adr/`.
+A few choices worth calling out. The full reasoning is in the [decision records](docs/adr/), with an [incident runbook](docs/runbooks/checkout-failures.md) and a [migration plan](docs/migration-plan.md).
 
 - **Redact at the edge.** The Collector is the one place every signal passes through, so PII rules live there once instead of in every service and every backend.
 - **Count before you sample.** Tail sampling keeps all failed traces and 10% of healthy ones, which is great for debugging and terrible for error rates. Request and error counts come from the Collector's span metrics, computed from 100% of spans before sampling.
