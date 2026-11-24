@@ -52,7 +52,7 @@ SELECT 'Logs', DATEDIFF(second, MAX(LOADED_AT), CURRENT_TIMESTAMP()),
        COUNT_IF(LOADED_AT >= DATEADD(hour, -1, CURRENT_TIMESTAMP()))
   FROM SKI_OBS.RAW.OTLP_LOGS;
 
-CREATE OR REPLACE PROCEDURE SUMMARIZE_INCIDENT(P_INCIDENT_ID NUMBER, P_MODEL STRING DEFAULT 'claude-3-5-sonnet')
+CREATE OR REPLACE PROCEDURE SUMMARIZE_INCIDENT(P_INCIDENT_ID NUMBER, P_MODEL STRING DEFAULT 'claude-sonnet-4-5')
   RETURNS STRING
   LANGUAGE SQL
   COMMENT = 'Writes an evidence-based AI summary for one incident and saves it on INCIDENTS'
@@ -60,6 +60,7 @@ CREATE OR REPLACE PROCEDURE SUMMARIZE_INCIDENT(P_INCIDENT_ID NUMBER, P_MODEL STR
 AS
 $$
 DECLARE
+  opened     TIMESTAMP_NTZ;
   w_start    TIMESTAMP_NTZ;
   w_end      TIMESTAMP_NTZ;
   evidence   STRING;
@@ -68,35 +69,67 @@ DECLARE
   used_model STRING;
 BEGIN
   -- The window: 15 minutes before the incident opened, to when it resolved (or now).
-  w_start := (SELECT DATEADD(minute, -15, OPENED_AT) FROM SKI_OBS.OPS.INCIDENTS WHERE INCIDENT_ID = :P_INCIDENT_ID);
+  opened  := (SELECT OPENED_AT FROM SKI_OBS.OPS.INCIDENTS WHERE INCIDENT_ID = :P_INCIDENT_ID);
+  w_start := DATEADD(minute, -15, opened);
   w_end   := (SELECT COALESCE(RESOLVED_AT, SYSDATE()) FROM SKI_OBS.OPS.INCIDENTS WHERE INCIDENT_ID = :P_INCIDENT_ID);
 
+  -- All times handed to the model are Mountain time, so its timeline matches the app.
   evidence := (SELECT TO_JSON(OBJECT_CONSTRUCT(
     'incident',
-      (SELECT OBJECT_DELETE(OBJECT_CONSTRUCT(*), 'AI_SUMMARY', 'AI_SUMMARY_MODEL', 'AI_SUMMARY_AT')
+      (SELECT OBJECT_CONSTRUCT('id', INCIDENT_ID, 'service', SERVICE_NAME, 'status', STATUS,
+                               'opened', CONVERT_TIMEZONE('UTC', 'America/Denver', OPENED_AT)::TIMESTAMP_NTZ,
+                               'resolved', CONVERT_TIMEZONE('UTC', 'America/Denver', RESOLVED_AT)::TIMESTAMP_NTZ,
+                               'trigger_rule', TRIGGER_RULE, 'peak_error_rate', PEAK_ERROR_RATE)
          FROM SKI_OBS.OPS.INCIDENTS WHERE INCIDENT_ID = :P_INCIDENT_ID),
-    'open_incidents_at_the_same_time',
-      (SELECT ARRAY_AGG(OBJECT_CONSTRUCT('id', INCIDENT_ID, 'service', SERVICE_NAME, 'opened_utc', OPENED_AT,
-                                         'resolved_utc', RESOLVED_AT, 'peak_error_rate', PEAK_ERROR_RATE))
+    'other_incidents_open_at_the_same_time',
+      (SELECT ARRAY_AGG(OBJECT_CONSTRUCT('id', INCIDENT_ID, 'service', SERVICE_NAME,
+                                         'opened', CONVERT_TIMEZONE('UTC', 'America/Denver', OPENED_AT)::TIMESTAMP_NTZ,
+                                         'resolved', CONVERT_TIMEZONE('UTC', 'America/Denver', RESOLVED_AT)::TIMESTAMP_NTZ,
+                                         'peak_error_rate', PEAK_ERROR_RATE))
          FROM SKI_OBS.OPS.INCIDENTS
         WHERE INCIDENT_ID <> :P_INCIDENT_ID
           AND OPENED_AT <= :w_end AND COALESCE(RESOLVED_AT, SYSDATE()) >= :w_start),
-    'golden_signals_by_minute_utc',
-      (SELECT ARRAY_AGG(OBJECT_CONSTRUCT('service', SERVICE_NAME, 'minute', MINUTE, 'requests', REQUESTS,
-                                         'errors', ERRORS, 'error_rate', ERROR_RATE, 'p95_ms', P95_MS,
-                                         'peak_active_requests', PEAK_ACTIVE_REQUESTS,
-                                         'peak_provider_demand', PEAK_PROVIDER_DEMAND))
+    -- Pre-computed comparisons, so the model reads facts instead of doing arithmetic on long arrays.
+    'key_facts_by_service',
+      (SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*)) FROM (
+         SELECT g.SERVICE_NAME,
+                CONVERT_TIMEZONE('UTC', 'America/Denver',
+                  MIN(IFF(g.ERROR_RATE > s.MAX_ERROR_RATE AND g.REQUESTS >= 5, g.MINUTE, NULL)))::TIMESTAMP_NTZ
+                                                                         AS FIRST_MINUTE_OVER_OBJECTIVE,
+                CONVERT_TIMEZONE('UTC', 'America/Denver', MAX(g.MINUTE))::TIMESTAMP_NTZ AS LAST_MINUTE_WITH_ANY_TRAFFIC,
+                ROUND(AVG(IFF(g.MINUTE < DATEADD(minute, -3, :opened), g.REQUESTS, NULL)))  AS REQUESTS_PER_MIN_BEFORE,
+                MAX(g.REQUESTS)                                                             AS PEAK_REQUESTS_PER_MIN,
+                ROUND(100 * AVG(IFF(g.MINUTE < DATEADD(minute, -3, :opened), g.ERROR_RATE, NULL)), 2) AS ERROR_PCT_BEFORE,
+                ROUND(100 * MAX(g.ERROR_RATE), 1)                                           AS PEAK_ERROR_PCT,
+                SUM(IFF(g.MINUTE >= DATEADD(minute, -3, :opened), g.ERRORS, 0))             AS FAILED_REQUESTS_SINCE_ONSET,
+                SUM(IFF(g.MINUTE >= DATEADD(minute, -3, :opened), g.REQUESTS, 0))           AS TOTAL_REQUESTS_SINCE_ONSET,
+                ROUND(AVG(IFF(g.MINUTE < DATEADD(minute, -3, :opened), g.P95_MS, NULL)))    AS P95_MS_BEFORE,
+                ROUND(MAX(g.P95_MS))                                                        AS PEAK_P95_MS,
+                ROUND(AVG(IFF(g.MINUTE < DATEADD(minute, -3, :opened), g.PEAK_PROVIDER_DEMAND, NULL)), 1)
+                                                                                            AS PROVIDER_DEMAND_BEFORE,
+                MAX(g.PEAK_PROVIDER_DEMAND)                                                 AS PEAK_PROVIDER_DEMAND
+           FROM SKI_OBS.OPS.GOLDEN_SIGNALS g
+           LEFT JOIN SKI_OBS.OPS.SLOS s ON s.SERVICE_NAME = g.SERVICE_NAME
+          WHERE g.MINUTE BETWEEN :w_start AND :w_end
+          GROUP BY g.SERVICE_NAME)),
+    'golden_signals_by_minute',
+      (SELECT ARRAY_AGG(OBJECT_CONSTRUCT('service', SERVICE_NAME,
+                                         'minute', CONVERT_TIMEZONE('UTC', 'America/Denver', MINUTE)::TIMESTAMP_NTZ,
+                                         'requests', REQUESTS, 'errors', ERRORS, 'error_rate', ERROR_RATE,
+                                         'p95_ms', P95_MS, 'peak_provider_demand', PEAK_PROVIDER_DEMAND))
                 WITHIN GROUP (ORDER BY MINUTE, SERVICE_NAME)
          FROM SKI_OBS.OPS.GOLDEN_SIGNALS
         WHERE MINUTE BETWEEN :w_start AND :w_end),
     'most_common_error_and_warning_logs',
       (SELECT ARRAY_AGG(OBJECT_CONSTRUCT('service', SERVICE_NAME, 'severity', SEVERITY, 'message', MESSAGE,
-                                         'count', N, 'first_utc', FIRST_SEEN, 'last_utc', LAST_SEEN))
+                                         'count', N, 'first_seen', FIRST_SEEN, 'last_seen', LAST_SEEN))
                 WITHIN GROUP (ORDER BY N DESC)
          FROM (SELECT SERVICE_NAME, SEVERITY,
                       -- group messages that differ only by numbers or amounts
                       REGEXP_REPLACE(BODY, '[0-9]+([.][0-9]+)?', 'N') AS MESSAGE,
-                      COUNT(*) AS N, MIN(LOG_TIME) AS FIRST_SEEN, MAX(LOG_TIME) AS LAST_SEEN
+                      COUNT(*) AS N,
+                      CONVERT_TIMEZONE('UTC', 'America/Denver', MIN(LOG_TIME))::TIMESTAMP_NTZ AS FIRST_SEEN,
+                      CONVERT_TIMEZONE('UTC', 'America/Denver', MAX(LOG_TIME))::TIMESTAMP_NTZ AS LAST_SEEN
                  FROM SKI_OBS.OTEL.LOGS
                 WHERE LOG_TIME BETWEEN :w_start AND :w_end AND SEVERITY_NUMBER >= 13
                 GROUP BY 1, 2, 3
@@ -119,28 +152,41 @@ BEGIN
 
   prompt := 'You are a senior site reliability engineer writing the first summary of a production incident '
     || 'for the on-call team and their manager. Use ONLY the evidence in the JSON below. '
-    || 'Every number you state must appear in the evidence or be simple arithmetic on it. '
-    || 'If the evidence does not support a conclusion, say what is missing instead of guessing. '
-    || 'Notes on the evidence: times are UTC; request, error and latency numbers come from 100% of traffic; '
-    || 'the "slowest operations" come from sampled traces, which keep every failed or slow trace, so use them '
-    || 'to find where time is spent, not to count errors. Log text may be masked.'
-    || '\n\nWrite in plain English, in markdown, with exactly these sections:\n'
+    || 'Every number you state must appear in the evidence or be simple arithmetic on it; prefer the numbers '
+    || 'in key_facts_by_service. If the evidence does not support a conclusion, say what is missing instead of guessing.'
+    || '\n\nHow to read the evidence:\n'
+    || '- All times are Mountain time. Request, error and latency numbers come from 100% of traffic.\n'
+    || '- "slowest_operations_from_sampled_traces" comes from sampled traces, which keep every failed or slow '
+    || 'trace, so use it to see where time is spent, not to count errors.\n'
+    || '- Compare each service before and during the incident: traffic, error rate, p95 latency and saturation.\n'
+    || '- Check saturation against the capacity described in the service catalog.\n'
+    || '- A service that is upstream or downstream of a failure can look healthy or go quiet without being broken; '
+    || 'check LAST_MINUTE_WITH_ANY_TRAFFIC and the call relationships in the service catalog before blaming it.\n'
+    || '- Distinguish the trigger (what changed) from the mechanism (why it failed) when the evidence shows both.\n'
+    || '- Log text may be masked.\n'
+    || '\nWrite in plain English, in markdown, with exactly these sections:\n'
     || '### What happened\nTwo or three sentences a manager can read.\n'
     || '### Impact\nWho was affected, how many requests failed, and for how long.\n'
     || '### Likely cause\nThe most likely cause, the evidence for it, and your confidence (high, medium or low).\n'
-    || '### Timeline (UTC)\nThree to six bullet points.\n'
-    || '### Next steps\nImmediate actions, then follow-ups that would prevent a repeat.\n'
+    || '### Timeline (Mountain time)\nThree to six bullet points.\n'
+    || '### Next steps\nImmediate actions, then follow-ups that would prevent a repeat. Be specific to this system.\n'
     || '### What the data cannot tell us\nOne to three bullet points.\n'
     || '\nEvidence:\n' || evidence;
 
+  -- Try the requested model, then fall back to models available in more regions.
   BEGIN
     answer := AI_COMPLETE(P_MODEL, prompt);
     used_model := P_MODEL;
   EXCEPTION
     WHEN OTHER THEN
-      -- The preferred model isn't available in every region; fall back to one that is.
-      answer := AI_COMPLETE('llama3.1-70b', prompt);
-      used_model := 'llama3.1-70b';
+      BEGIN
+        answer := AI_COMPLETE('claude-3-7-sonnet', prompt);
+        used_model := 'claude-3-7-sonnet';
+      EXCEPTION
+        WHEN OTHER THEN
+          answer := AI_COMPLETE('llama3.3-70b', prompt);
+          used_model := 'llama3.3-70b';
+      END;
   END;
 
   UPDATE SKI_OBS.OPS.INCIDENTS
