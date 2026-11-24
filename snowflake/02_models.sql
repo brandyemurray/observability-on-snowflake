@@ -21,7 +21,7 @@ CREATE OR REPLACE FUNCTION ATTRS(ATTRIBUTE_LIST VARIANT)
 AS
 $$
 def _value(v):
-    if not v:
+    if not isinstance(v, dict):
         return None
     if "stringValue" in v:
         return v["stringValue"]
